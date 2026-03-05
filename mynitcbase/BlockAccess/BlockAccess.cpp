@@ -245,10 +245,7 @@ int BlockAccess::renameAttribute(char relName[ATTR_SIZE],
         return E_ATTRNOTEXIST;
     }
 
-    /* ---------------------------------------------------------
-       Step 3: Update Attribute Catalog entry
-       --------------------------------------------------------- */
-
+    
     RecBuffer renameBlock(attrToRenameRecId.block);
 
     renameBlock.getRecord(attrCatEntryRecord, attrToRenameRecId.slot);
