@@ -20,12 +20,13 @@ int BlockBuffer::getHeader(struct HeadInfo *head) {
         return ret;
     }
 
-    memcpy(&head->numEntries, bufferPtr + 16, 4);
-    memcpy(&head->numAttrs,   bufferPtr + 20, 4);
-    memcpy(&head->lblock,     bufferPtr + 8, 4);
-    memcpy(&head->rblock,     bufferPtr + 12, 4);
-    memcpy(&head->numSlots,   bufferPtr + 24, 4);
-
+    memcpy(&head->numSlots, bufferPtr + 24, 4);
+memcpy(&head->numAttrs, bufferPtr + 20, 4);
+memcpy(&head->numEntries, bufferPtr + 16, 4);
+memcpy(&head->rblock, bufferPtr + 12, 4);
+memcpy(&head->lblock, bufferPtr + 8, 4);
+memcpy(&head->pblock, bufferPtr + 4, 4);
+memcpy(&head->blockType, bufferPtr, 4);
     return SUCCESS;
 }
 
@@ -273,7 +274,13 @@ RecBuffer::RecBuffer() : BlockBuffer('R'){}
 BlockBuffer::BlockBuffer(char blockType) {
 
 
-    int ret = getFreeBlock(blockType);
+    int ret;
+    switch(blockType)
+{
+case 'R': ret= REC;
+case 'I': ret= IND_INTERNAL;
+case 'L': ret= IND_LEAF;
+}
 
     if (ret >= 0) {
         this->blockNum = ret;
@@ -309,4 +316,21 @@ int RecBuffer::setSlotMap(unsigned char *slotMap) {
 int BlockBuffer::getBlockNum(){
 
     return blockNum;
+}
+
+void BlockBuffer::releaseBlock()
+{
+    if(blockNum == INVALID_BLOCKNUM)
+        return;
+    else{
+    int buffNum = StaticBuffer::getBufferNum(blockNum);
+
+    if(buffNum != E_BLOCKNOTINBUFFER)
+    {
+        StaticBuffer::metainfo[buffNum].free = true;
+    }
+
+    StaticBuffer::blockAllocMap[blockNum] = UNUSED_BLK;
+
+    blockNum = INVALID_BLOCKNUM;}
 }
