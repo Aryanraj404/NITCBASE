@@ -275,19 +275,25 @@ BlockBuffer::BlockBuffer(char blockType) {
 
 
     int ret;
-    switch(blockType)
+    switch (blockType)
 {
-case 'R': ret= REC;
-case 'I': ret= IND_INTERNAL;
-case 'L': ret= IND_LEAF;
+case 'R':
+    ret = REC;
+    break;
+
+case 'I':
+    ret = IND_INTERNAL;
+    break;
+
+case 'L':
+    ret = IND_LEAF;
+    break;
 }
 
-    if (ret >= 0) {
-        this->blockNum = ret;
-    }
-    else {
-        this->blockNum = ret;
-    }
+        
+        this->blockNum = getFreeBlock(ret);
+  
+      
 }
 int RecBuffer::setSlotMap(unsigned char *slotMap) {
 

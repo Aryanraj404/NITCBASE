@@ -506,7 +506,7 @@ int BlockAccess::deleteRelation(char relName[ATTR_SIZE]) {
         }
 
         // (future stage for index deletion)
-
+        
     }
 
     /*
