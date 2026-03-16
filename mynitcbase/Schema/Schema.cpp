@@ -3,7 +3,7 @@
 #include "Cache/OpenRelTable.h"
 #include <cmath>
 #include <cstring>
-
+#include <stdio.h>
 int Schema::openRel(char relName[ATTR_SIZE]) {
   int ret = OpenRelTable::openRel(relName);
 
@@ -137,7 +137,13 @@ int Schema::deleteRel(char *relName)
     int relId = OpenRelTable::getRelId(relName);
     if (0 <= relId && relId < MAX_OPEN)
         return E_RELOPEN;
-
+   
     int retVal = BlockAccess::deleteRelation(relName);
     return retVal;
 }
+
+/*
+NOTE: the caller is expected to allocate space for the argument `record` based
+      on the size of the relation. This function will only copy the result of
+      the projection onto the array pointed to by the argument.
+*/

@@ -432,6 +432,7 @@ int BlockAccess::deleteRelation(char relName[ATTR_SIZE]) {
         blockBuf.getHeader(&header);
 
         int nextBlock = header.rblock;
+        // printf("b=%d\n",block);
 
         blockBuf.releaseBlock();
 
@@ -547,6 +548,65 @@ int BlockAccess::deleteRelation(char relName[ATTR_SIZE]) {
     relEntry.numRecs -= numberOfAttributesDeleted;
 
     RelCacheTable::setRelCatEntry(ATTRCAT_RELID, &relEntry);
+
+    return SUCCESS;
+}
+
+int BlockAccess::project(int relId, Attribute *record)
+{
+    RecId prevRecId;
+    RelCacheTable::getSearchIndex(relId, &prevRecId);
+
+    int block, slot;
+
+    if (prevRecId.block == -1 && prevRecId.slot == -1)
+    {
+        RelCatEntry relCatEntry;
+        RelCacheTable::getRelCatEntry(relId, &relCatEntry);
+        block = relCatEntry.firstBlk;
+        slot = 0;
+    }
+    else
+    {
+        block = prevRecId.block;
+        slot = prevRecId.slot + 1;
+    }
+
+    while (block != -1)
+    {
+        RecBuffer recBuffer(block);
+
+        HeadInfo header;
+        recBuffer.getHeader(&header);
+
+        unsigned char slotMap[header.numSlots];
+        recBuffer.getSlotMap(slotMap);
+
+        if (slot >= header.numSlots)
+        {
+            block = header.rblock;
+            slot = 0;
+        }
+        else if (slotMap[slot] == SLOT_UNOCCUPIED)
+        {
+            slot++;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    if (block == -1)
+    {
+        return E_NOTFOUND;
+    }
+
+    RecId nextRecId{block, slot};
+    RelCacheTable::setSearchIndex(relId, &nextRecId);
+
+    RecBuffer recBuffer(block);
+    recBuffer.getRecord(record, slot);
 
     return SUCCESS;
 }
