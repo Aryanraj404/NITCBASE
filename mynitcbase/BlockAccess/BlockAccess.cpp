@@ -5,7 +5,7 @@
 #include "define/constants.h"    
 #include <cstring>               
 #include <stdio.h>
-
+int comparisonCount = 0;
 RecId BlockAccess::linearSearch(int relId,
                                 char attrName[ATTR_SIZE],
                                 union Attribute attrVal,
@@ -61,9 +61,9 @@ RecId BlockAccess::linearSearch(int relId,
         Attribute record[head.numAttrs];
         recBuf.getRecord(record, slot);
 
-  
+        comparisonCount++;
         int cmpVal = compareAttrs(record[attrOffset], attrVal, attrType);
-
+        
        
         if (
             (op == NE && cmpVal != 0) ||
@@ -376,20 +376,49 @@ int BlockAccess::insert(int relId, Attribute *record) {
     return SUCCESS;
 }
 
-int BlockAccess::search(int relId, Attribute *record, char attrName[ATTR_SIZE], Attribute attrVal, int op)
-{
+int BlockAccess::search(int relId, Attribute *record,
+                        char attrName[ATTR_SIZE],
+                        Attribute attrVal, int op) {
 
     RecId recId;
 
-    recId = linearSearch(relId, attrName, attrVal, op);
 
-    if(recId.block == -1 && recId.slot == -1)
+    AttrCatEntry attrEntry;
+    int status = AttrCacheTable::getAttrCatEntry(relId, attrName, &attrEntry);
+
+    if (status != SUCCESS) {
+        return status;  
+    }
+
+    int rootBlock = attrEntry.rootBlock;
+
+    
+
+    if (rootBlock == -1) {
+       
+        recId = BlockAccess::linearSearch(relId, attrName, attrVal, op);
+    }
+    else {
+        
+        recId = BPlusTree::bPlusSearch(relId, attrName, attrVal, op, &comparisonCount);
+    }
+
+ 
+    if (recId.block == -1 && recId.slot == -1) {
+        printf("Comparisons: %d\n", comparisonCount);
+       
         return E_NOTFOUND;
+    }
 
-    RecBuffer recBlock(recId.block);
+ 
+    RecBuffer recBuf(recId.block);
+    int status2 = recBuf.getRecord(record, recId.slot);
 
-    recBlock.getRecord(record, recId.slot);
-
+    if (status2 != SUCCESS) {
+        return status2;
+    }
+    printf("Comparisons: %d\n", comparisonCount);
+   
     return SUCCESS;
 }
 
