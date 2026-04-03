@@ -265,8 +265,11 @@ int OpenRelTable::openRel(char relName[ATTR_SIZE]) {
 
 int OpenRelTable::closeRel(int relId) {
 
-   
-    if (relId < 2 || relId >= MAX_OPEN) {
+    if (relId == RELCAT_RELID || relId == ATTRCAT_RELID) {
+        return E_NOTPERMITTED;
+    }
+
+    if (relId < 0 || relId >= MAX_OPEN) {
         return E_OUTOFBOUND;
     }
 
@@ -301,12 +304,26 @@ int OpenRelTable::closeRel(int relId) {
 
     
 
-    AttrCacheEntry *entry = AttrCacheTable::attrCache[relId];
+    AttrCacheEntry *curr = AttrCacheTable::attrCache[relId];
 
-    while (entry != nullptr) {
-        AttrCacheEntry *next = entry->next;
-        free(entry);
-        entry = next;
+    while (curr) {
+
+        if (curr->dirty == true) {
+
+            // convert struct → record
+            union Attribute record[ATTRCAT_NO_ATTRS];
+            AttrCacheTable::attrCatEntryToRecord(&(curr->attrCatEntry), record);
+
+            // write back
+            RecId recId = curr->recId;
+            RecBuffer attrBlock(recId.block);
+            attrBlock.setRecord(record, recId.slot);
+        }
+
+        // move and delete
+        AttrCacheEntry *temp = curr;
+        curr = curr->next;
+        delete temp;
     }
 
     AttrCacheTable::attrCache[relId] = nullptr;
@@ -314,10 +331,6 @@ int OpenRelTable::closeRel(int relId) {
 
 
     tableMetaInfo[relId].free = true;
-
-
-RelCacheTable::resetSearchIndex(RELCAT_RELID);
-RelCacheTable::resetSearchIndex(ATTRCAT_RELID);
 
 
     return SUCCESS;

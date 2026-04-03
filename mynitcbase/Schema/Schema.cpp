@@ -147,3 +147,66 @@ NOTE: the caller is expected to allocate space for the argument `record` based
       on the size of the relation. This function will only copy the result of
       the projection onto the array pointed to by the argument.
 */
+int Schema::createIndex(char relName[ATTR_SIZE], char attrName[ATTR_SIZE]) {
+
+    // ❌ cannot create index on system catalogs
+    if (strcmp(relName, RELCAT_RELNAME) == 0 ||
+        strcmp(relName, ATTRCAT_RELNAME) == 0) {
+        return E_NOTPERMITTED;
+    }
+
+    // get relation id
+    int relId = OpenRelTable::getRelId(relName);
+
+    // ❌ relation not open
+    if (relId == E_RELNOTOPEN) {
+        return E_RELNOTOPEN;
+    }
+
+    // create B+ tree index
+    int status = BPlusTree::bPlusCreate(relId, attrName);
+
+    return status;
+}
+int Schema::dropIndex(char *relName, char *attrName) {
+
+    // ❌ cannot drop index on system catalogs
+    if (strcmp(relName, RELCAT_RELNAME) == 0 ||
+        strcmp(relName, ATTRCAT_RELNAME) == 0) {
+        return E_NOTPERMITTED;
+    }
+
+    // get relId
+    int relId = OpenRelTable::getRelId(relName);
+
+    // ❌ relation not open
+    if (relId == E_RELNOTOPEN) {
+        return E_RELNOTOPEN;
+    }
+
+    // get attribute entry
+    AttrCatEntry attrEntry;
+    int status = AttrCacheTable::getAttrCatEntry(relId, attrName, &attrEntry);
+
+    // ❌ attribute does not exist
+    if (status != SUCCESS) {
+        return E_ATTRNOTEXIST;
+    }
+
+    // get rootBlock
+    int rootBlock = attrEntry.rootBlock;
+
+    // ❌ no index exists
+    if (rootBlock == -1) {
+        return E_NOINDEX;
+    }
+
+    // destroy B+ tree
+    BPlusTree::bPlusDestroy(rootBlock);
+
+    // update rootBlock in cache
+    attrEntry.rootBlock = -1;
+    AttrCacheTable::setAttrCatEntry(relId, attrName, &attrEntry);
+
+    return SUCCESS;
+}

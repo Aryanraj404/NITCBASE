@@ -204,3 +204,77 @@ int AttrCacheTable::resetSearchIndex(int relId,
 
     return AttrCacheTable::setSearchIndex(relId, attrOffset, &idx);
 }
+int AttrCacheTable::setAttrCatEntry(int relId, char attrName[ATTR_SIZE], AttrCatEntry *attrCatBuf)
+{
+    if (relId < 0 || relId >= MAX_OPEN)
+        return E_OUTOFBOUND;
+
+    if (attrCache[relId] == nullptr)
+        return E_RELNOTOPEN;
+
+    AttrCacheEntry *curr = attrCache[relId];
+
+    while (curr)
+    {
+        if (strcmp(curr->attrCatEntry.attrName, attrName) == 0)
+        {
+            curr->attrCatEntry = *attrCatBuf;
+            curr->dirty = true;
+            return SUCCESS;
+        }
+        curr = curr->next;
+    }
+
+    return E_ATTRNOTEXIST;
+}
+int AttrCacheTable::setAttrCatEntry(int relId, int attrOffset, AttrCatEntry *attrCatBuf)
+{
+    if (relId < 0 || relId >= MAX_OPEN)
+        return E_OUTOFBOUND;
+
+    if (attrCache[relId] == nullptr)
+        return E_RELNOTOPEN;
+
+    AttrCacheEntry *curr = attrCache[relId];
+
+    while (curr)
+    {
+        if (curr->attrCatEntry.offset == attrOffset)
+        {
+            curr->attrCatEntry = *attrCatBuf;
+            curr->dirty = true;
+            return SUCCESS;
+        }
+        curr = curr->next;
+    }
+
+    return E_ATTRNOTEXIST;
+}
+void AttrCacheTable::attrCatEntryToRecord(
+    AttrCatEntry *attrCatEntry,
+    union Attribute record[ATTRCAT_NO_ATTRS])
+{
+    // copy relation name
+    strcpy(record[ATTRCAT_REL_NAME_INDEX].sVal,
+           attrCatEntry->relName);
+
+    // copy attribute name
+    strcpy(record[ATTRCAT_ATTR_NAME_INDEX].sVal,
+           attrCatEntry->attrName);
+
+    // copy attribute type
+    record[ATTRCAT_ATTR_TYPE_INDEX].nVal =
+        attrCatEntry->attrType;
+
+    // copy primary flag
+    record[ATTRCAT_PRIMARY_FLAG_INDEX].nVal =
+        attrCatEntry->primaryFlag;
+
+    // copy root block
+    record[ATTRCAT_ROOT_BLOCK_INDEX].nVal =
+        attrCatEntry->rootBlock;
+
+    // copy offset
+    record[ATTRCAT_OFFSET_INDEX].nVal =
+        attrCatEntry->offset;
+}

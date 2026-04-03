@@ -396,9 +396,77 @@ unsigned char *entryPtr =
     return SUCCESS;
 }
 int IndInternal::setEntry(void *ptr, int indexNum) {
-  return 0;
+
+    // check bounds
+    if (indexNum < 0 || indexNum >= MAX_KEYS_INTERNAL) {
+        return E_OUTOFBOUND;
+    }
+
+    unsigned char *bufferPtr;
+
+    // load block
+    int status = loadBlockAndGetBufferPtr(&bufferPtr);
+    if (status != SUCCESS) {
+        return status;
+    }
+
+    // cast pointer
+    struct InternalEntry *internalEntry = (struct InternalEntry *)ptr;
+
+    // correct entry size
+    int entrySize = sizeof(int32_t) + sizeof(Attribute) + sizeof(int32_t);
+
+    // find position
+    unsigned char *entryPtr =
+        bufferPtr + HEADER_SIZE + (indexNum * entrySize);
+
+    // copy fields
+    memcpy(entryPtr, &(internalEntry->lChild), sizeof(int32_t));
+    memcpy(entryPtr + sizeof(int32_t),
+           &(internalEntry->attrVal),
+           sizeof(Attribute));
+    memcpy(entryPtr + sizeof(int32_t) + sizeof(Attribute),
+           &(internalEntry->rChild),
+           sizeof(int32_t));
+
+    // mark dirty
+    status = StaticBuffer::setDirtyBit(this->blockNum);
+    if (status != SUCCESS) {
+        return status;
+    }
+
+    return SUCCESS;
 }
 
 int IndLeaf::setEntry(void *ptr, int indexNum) {
-  return 0;
+
+    // check bounds
+    if (indexNum < 0 || indexNum >= MAX_KEYS_LEAF) {
+        return E_OUTOFBOUND;
+    }
+
+    unsigned char *bufferPtr;
+
+    // load block into buffer
+    int status = loadBlockAndGetBufferPtr(&bufferPtr);
+    if (status != SUCCESS) {
+        return status;
+    }
+
+    // calculate position of entry
+    unsigned char *entryPtr = bufferPtr + HEADER_SIZE + (indexNum * LEAF_ENTRY_SIZE);
+
+    // copy data into block
+    memcpy(entryPtr, (struct Index *)ptr, LEAF_ENTRY_SIZE);
+
+    // mark block as dirty
+    status = StaticBuffer::setDirtyBit(this->blockNum);
+    if (status != SUCCESS) {
+        return status;
+    }
+
+    return SUCCESS;
+}
+IndInternal::IndInternal() : IndBuffer(IND_INTERNAL) {
+    // constructor 1 → allocate new internal block
 }

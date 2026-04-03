@@ -373,7 +373,43 @@ int BlockAccess::insert(int relId, Attribute *record) {
 
     RelCacheTable::setRelCatEntry(relId, &relEntry);
 
-    return SUCCESS;
+    int flag = SUCCESS;
+
+    // get relation info
+    RelCatEntry relCatEntry;
+    RelCacheTable::getRelCatEntry(relId, &relCatEntry);
+
+    int numAttrs = relCatEntry.numAttrs;
+
+    // iterate over all attributes
+    for (int attrOffset = 0; attrOffset < numAttrs; attrOffset++) {
+
+        // get attribute entry
+        AttrCatEntry attrCatEntry;
+        int status = AttrCacheTable::getAttrCatEntry(relId,
+                                                     attrOffset,
+                                                     &attrCatEntry);
+
+        if (status != SUCCESS) continue;
+
+        int rootBlock = attrCatEntry.rootBlock;
+
+        // if index exists
+        if (rootBlock != -1) {
+
+            int retVal = BPlusTree::bPlusInsert(relId,
+                                                attrCatEntry.attrName,
+                                                record[attrOffset],
+                                                rec_id);
+
+            if (retVal == E_DISKFULL) {
+                // index got destroyed
+                flag = E_INDEX_BLOCKS_RELEASED;
+            }
+        }
+    }
+
+    return flag;
 }
 
 int BlockAccess::search(int relId, Attribute *record,
@@ -406,7 +442,7 @@ int BlockAccess::search(int relId, Attribute *record,
  
     if (recId.block == -1 && recId.slot == -1) {
         printf("Comparisons: %d\n", comparisonCount);
-       
+       comparisonCount = 0;
         return E_NOTFOUND;
     }
 
@@ -417,7 +453,7 @@ int BlockAccess::search(int relId, Attribute *record,
     if (status2 != SUCCESS) {
         return status2;
     }
-    printf("Comparisons: %d\n", comparisonCount);
+    // printf("Comparisons: %d\n", comparisonCount);
    
     return SUCCESS;
 }
@@ -536,6 +572,8 @@ int BlockAccess::deleteRelation(char relName[ATTR_SIZE]) {
         }
 
         // (future stage for index deletion)
+        if (rootBlock != -1) {
+			BPlusTree::bPlusDestroy(rootBlock);}
         
     }
 
