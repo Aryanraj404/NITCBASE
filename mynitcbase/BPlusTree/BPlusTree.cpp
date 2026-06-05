@@ -1,511 +1,583 @@
-#include "BlockAccess.h"
+#include "BPlusTree.h"
 
 #include <cstring>
-#include <cstdlib>
 #include <cstdio>
-
-RecId BlockAccess::linearSearch(int relId, char attrName[ATTR_SIZE], union Attribute attrVal, int op)
+RecId BPlusTree::bPlusSearch(int relId, char attrName[ATTR_SIZE], Attribute attrVal, int op)
 {
-    RecId prevRecId;
-    RelCacheTable::getSearchIndex(relId, &prevRecId);
+    IndexId searchIndex;
+    AttrCacheTable::getSearchIndex(relId, attrName, &searchIndex);
 
-    int block, slot;
+    AttrCatEntry attrCatEntry;
+    AttrCacheTable::getAttrCatEntry(relId, attrName, &attrCatEntry);
 
-    if (prevRecId.block == -1 && prevRecId.slot == -1)
+    int block, index;
+
+    if (searchIndex.block == -1 && searchIndex.index == -1)
     {
-        RelCatEntry relCatEntry;
-        RelCacheTable::getRelCatEntry(relId, &relCatEntry);
-        block = relCatEntry.firstBlk;
-        slot = 0;
+        block = attrCatEntry.rootBlock;
+        index = 0;
+
+        if (block == -1)
+            return RecId{-1, -1};
     }
     else
     {
-        block = prevRecId.block;
-        slot = prevRecId.slot + 1;
+
+        block = searchIndex.block;
+        index = searchIndex.index + 1;
+
+        IndLeaf leaf(block);
+
+        HeadInfo leafHead;
+        leaf.BlockBuffer::getHeader(&leafHead);
+
+        if (index >= leafHead.numEntries)
+        {
+            block = leafHead.rblock;
+            index = 0;
+            if (block == -1)
+            {
+                return RecId{-1, -1};
+            }
+        }
+    }
+
+    while (StaticBuffer::getStaticBlockType(block) == IND_INTERNAL)
+    {
+        IndInternal internalBlk(block);
+
+        HeadInfo intHead;
+        internalBlk.BlockBuffer::getHeader(&intHead);
+
+        InternalEntry intEntry;
+
+        if (op == NE || op == LT || op == LE)
+        {
+            internalBlk.IndInternal::getEntry(&intEntry, 0);
+            block = intEntry.lChild;
+        }
+        else
+        {
+            bool flag = true;
+            for (int i = 0; i < intHead.numEntries; i++)
+            {
+                internalBlk.IndInternal::getEntry(&intEntry, i);
+                int cmpVal = compareAttrs(intEntry.attrVal, attrVal, attrCatEntry.attrType);
+                if (((op == EQ || op == GE) && cmpVal >= 0) || (op == GT && cmpVal > 0))
+                {
+                    block = intEntry.lChild;
+                    flag = false;
+                    break;
+                }
+            }
+            if (flag)
+            {
+                internalBlk.getEntry(&intEntry, intHead.numEntries - 1);
+                block = intEntry.rChild;
+            }
+        }
     }
 
     while (block != -1)
     {
-        RecBuffer recBuffer(block);
+        IndLeaf leafBlk(block);
+        HeadInfo leafHead;
+        leafBlk.getHeader(&leafHead);
 
-        HeadInfo header;
-        recBuffer.getHeader(&header);
+        Index leafEntry;
 
-        Attribute rec[header.numAttrs];
-        recBuffer.getRecord(rec, slot);
-
-        unsigned char slotMap[header.numSlots];
-        recBuffer.getSlotMap(slotMap);
-
-        if (slot >= header.numSlots)
+        while (index < leafHead.numEntries)
         {
-            block = header.rblock;
-            slot = 0;
-            continue;
-        }
-        else if (slotMap[slot] == SLOT_UNOCCUPIED)
-        {
-            slot++;
-            continue;
-        }
+            leafBlk.getEntry(&leafEntry, index);
+            int cmpVal = compareAttrs(leafEntry.attrVal, attrVal, attrCatEntry.attrType);
 
-        AttrCatEntry attrCatBuf;
-        AttrCacheTable::getAttrCatEntry(relId, attrName, &attrCatBuf);
-        union Attribute attr = rec[attrCatBuf.offset];
+            if (
+                (op == EQ && cmpVal == 0) ||
+                (op == LE && cmpVal <= 0) ||
+                (op == LT && cmpVal < 0) ||
+                (op == GT && cmpVal > 0) ||
+                (op == GE && cmpVal >= 0) ||
+                (op == NE && cmpVal != 0))
+            {
+                IndexId newIndex{block, index};
+                AttrCacheTable::setSearchIndex(relId, attrName, &newIndex);
+                return RecId{leafEntry.block, leafEntry.slot};
+            }
+            else if ((op == EQ || op == LE || op == LT) && cmpVal > 0)
+            {
+                return RecId{-1, -1};
+            }
 
-        int cmpVal;
-        cmpVal = compareAttrs(attr, attrVal, attrCatBuf.attrType);
-
-        if (
-            (op == NE && cmpVal != 0) || // if op is "not equal to"
-            (op == LT && cmpVal < 0) ||  // if op is "less than"
-            (op == LE && cmpVal <= 0) || // if op is "less than or equal to"
-            (op == EQ && cmpVal == 0) || // if op is "equal to"
-            (op == GT && cmpVal > 0) ||  // if op is "greater than"
-            (op == GE && cmpVal >= 0)    // if op is "greater than or equal to"
-        )
-        {
-            RecId hitId = {block, slot};
-            RelCacheTable::setSearchIndex(relId, &hitId);
-            return RecId{block, slot};
+            ++index;
         }
 
-        slot++;
+        if (op != NE)
+        {
+            break;
+        }
+
+        block = leafHead.rblock;
+        index = 0;
     }
 
     return RecId{-1, -1};
 }
 
-int BlockAccess::renameRelation(char oldName[ATTR_SIZE], char newName[ATTR_SIZE])
+int BPlusTree::bPlusCreate(int relId, char attrName[ATTR_SIZE])
 {
-    RelCacheTable::resetSearchIndex(RELCAT_RELID);
-
-    Attribute newRelationName;
-    strcpy(newRelationName.sVal, newName);
-
-    RecId recId = linearSearch(RELCAT_RELID, RELCAT_ATTR_RELNAME, newRelationName, EQ);
-    if (recId.block != -1 && recId.slot != -1)
-    {
-        return E_RELEXIST;
-    }
-
-    RelCacheTable::resetSearchIndex(RELCAT_RELID);
-
-    Attribute oldRelationName;
-    strcpy(oldRelationName.sVal, oldName);
-
-    recId = linearSearch(RELCAT_RELID, RELCAT_ATTR_RELNAME, oldRelationName, EQ);
-    if (recId.block == -1 || recId.slot == -1)
-    {
-        return E_RELNOTEXIST;
-    }
-
-    RecBuffer relCatBuffer(recId.block);
-    Attribute rec[RELCAT_NO_ATTRS];
-    relCatBuffer.getRecord(rec, recId.slot);
-
-    strcpy(rec[RELCAT_REL_NAME_INDEX].sVal, newName);
-    relCatBuffer.setRecord(rec, recId.slot);
-
-    RelCacheTable::resetSearchIndex(ATTRCAT_RELID);
-
-    while (true)
-    {
-        RecId attrRecId = linearSearch(ATTRCAT_RELID, ATTRCAT_ATTR_RELNAME, oldRelationName, EQ);
-
-        if (attrRecId.block == -1)
-            break;
-
-        RecBuffer attrCatBuffer(attrRecId.block);
-        Attribute attrCatRec[ATTRCAT_NO_ATTRS];
-        attrCatBuffer.getRecord(attrCatRec, attrRecId.slot);
-
-        strcpy(attrCatRec[ATTRCAT_REL_NAME_INDEX].sVal, newName);
-        attrCatBuffer.setRecord(attrCatRec, attrRecId.slot);
-    }
-
-    return SUCCESS;
-}
-
-int BlockAccess::renameAttribute(char relName[ATTR_SIZE], char oldName[ATTR_SIZE], char newName[ATTR_SIZE])
-{
-    RelCacheTable::resetSearchIndex(RELCAT_RELID);
-
-    Attribute relNameAttr;
-    strcpy(relNameAttr.sVal, relName);
-
-    RecId recId = linearSearch(RELCAT_RELID, RELCAT_ATTR_RELNAME, relNameAttr, EQ);
-    if (recId.block == -1 || recId.slot == -1)
-    {
-        return E_RELNOTEXIST;
-    }
-
-    RelCacheTable::resetSearchIndex(ATTRCAT_RELID);
-
-    RecId attrToRenameRecId{-1, -1};
-    Attribute attrCatEntryRecord[ATTRCAT_NO_ATTRS];
-
-    while (true)
-    {
-        RecId recId = linearSearch(ATTRCAT_RELID, ATTRCAT_ATTR_RELNAME, relNameAttr, EQ);
-
-        if (recId.block == -1 && recId.slot == -1)
-            break;
-
-        RecBuffer attrCatBuffer(recId.block);
-        Attribute rec[ATTRCAT_NO_ATTRS];
-        attrCatBuffer.getRecord(rec, recId.slot);
-
-        if (strcmp(rec[ATTRCAT_ATTR_NAME_INDEX].sVal, oldName) == 0)
-        {
-            attrToRenameRecId.block = recId.block;
-            attrToRenameRecId.slot = recId.slot;
-        }
-
-        if (strcmp(rec[ATTRCAT_ATTR_NAME_INDEX].sVal, newName) == 0)
-            return E_ATTREXIST;
-    }
-
-    if (attrToRenameRecId.block == -1 && attrToRenameRecId.slot == -1)
-        return E_ATTRNOTEXIST;
-
-    RecBuffer attrCatBuffer(attrToRenameRecId.block);
-    Attribute rec[ATTRCAT_NO_ATTRS];
-    attrCatBuffer.getRecord(rec, attrToRenameRecId.slot);
-
-    strcpy(rec[ATTRCAT_ATTR_NAME_INDEX].sVal, newName);
-    attrCatBuffer.setRecord(rec, attrToRenameRecId.slot);
-
-    return SUCCESS;
-}
-
-int BlockAccess::insert(int relId, Attribute *record)
-{
-    RelCatEntry relCatEntry;
-    RelCacheTable::getRelCatEntry(relId, &relCatEntry);
-
-    int blockNum = relCatEntry.firstBlk;
-
-    RecId rec_id = {-1, -1};
-
-    int numOfSlots = relCatEntry.numSlotsPerBlk;
-    int numOfAttributes = relCatEntry.numAttrs;
-
-    int prevBlockNum = -1;
-
-    while (blockNum != -1)
-    {
-        RecBuffer recBuffer(blockNum);
-        HeadInfo header;
-        recBuffer.getHeader(&header);
-        unsigned char slotMap[numOfSlots];
-        recBuffer.getSlotMap(slotMap);
-
-        for (int i = 0; i < numOfSlots; ++i)
-        {
-            if (slotMap[i] == SLOT_UNOCCUPIED)
-            {
-                rec_id.block = blockNum;
-                rec_id.slot = i;
-                break;
-            }
-        }
-
-        if (rec_id.block != -1 && rec_id.slot != -1)
-            break;
-
-        prevBlockNum = blockNum;
-        blockNum = header.rblock;
-    }
-
-    if (rec_id.block == -1 && rec_id.slot == -1)
-    {
-        if (relId == RELCAT_RELID)
-            return E_MAXRELATIONS;
-
-        RecBuffer recBuffer;
-        int ret = recBuffer.getBlockNum();
-        if (ret == E_DISKFULL)
-            return E_DISKFULL;
-
-        rec_id.block = ret;
-        rec_id.slot = 0;
-
-        HeadInfo header = {
-            .blockType = REC,
-            .pblock = -1,
-            .lblock = prevBlockNum,
-            .rblock = -1,
-            .numEntries = 0,
-            .numAttrs = numOfAttributes,
-            .numSlots = numOfSlots};
-        recBuffer.setHeader(&header);
-
-        unsigned char slotMap[numOfSlots];
-
-        for (int i = 0; i < numOfSlots; ++i)
-        {
-            slotMap[i] = SLOT_UNOCCUPIED;
-        }
-        recBuffer.setSlotMap(slotMap);
-
-        if (prevBlockNum != -1)
-        {
-            RecBuffer recBuffer(prevBlockNum);
-            HeadInfo header;
-            recBuffer.getHeader(&header);
-
-            header.rblock = rec_id.block;
-            recBuffer.setHeader(&header);
-        }
-        else
-        {
-            relCatEntry.firstBlk = rec_id.block;
-            RelCacheTable::setRelCatEntry(relId, &relCatEntry);
-        }
-
-        relCatEntry.lastBlk = rec_id.block;
-        RelCacheTable::setRelCatEntry(relId, &relCatEntry);
-    }
-
-    RecBuffer recBuffer(rec_id.block);
-    recBuffer.setRecord(record, rec_id.slot);
-
-    unsigned char slotMap[numOfSlots];
-    recBuffer.getSlotMap(slotMap);
-    slotMap[rec_id.slot] = SLOT_OCCUPIED;
-    recBuffer.setSlotMap(slotMap);
-
-    HeadInfo header;
-    recBuffer.getHeader(&header);
-    header.numEntries++;
-    recBuffer.setHeader(&header);
-
-    relCatEntry.numRecs++;
-    RelCacheTable::setRelCatEntry(relId, &relCatEntry);
-
-    int flag = SUCCESS;
-    for (int attrOffset = 0; attrOffset < numOfAttributes; attrOffset++)
-    {
-        AttrCatEntry attrCatEntry;
-        int ret = AttrCacheTable::getAttrCatEntry(relId, attrOffset, &attrCatEntry);
-
-        int rootBlock = attrCatEntry.rootBlock;
-        if(rootBlock != -1)
-        {
-            int retVal = BPlusTree::bPlusInsert(relId, attrCatEntry.attrName, record[attrOffset], rec_id);
-
-            if (retVal == E_DISKFULL) {
-                flag = E_INDEX_BLOCKS_RELEASED;
-            }
-        }
-    }
-
-    return flag;
-}
-
-int BlockAccess::search(int relId, Attribute *record, char attrName[ATTR_SIZE], Attribute attrVal, int op)
-{
-    RecId recId;
+    if (relId == RELCAT_RELID || relId == ATTRCAT_RELID)
+        return E_NOTPERMITTED;
 
     AttrCatEntry attrCatEntry;
     int ret = AttrCacheTable::getAttrCatEntry(relId, attrName, &attrCatEntry);
     if (ret != SUCCESS)
         return ret;
 
-    int rootBlock = attrCatEntry.rootBlock;
-    if (rootBlock == -1)
+    if (attrCatEntry.rootBlock != -1)
     {
-        recId = BlockAccess::linearSearch(relId, attrName, attrVal, op);
-    }
-    else
-    {
-        recId = BPlusTree::bPlusSearch(relId, attrName, attrVal, op);
+        return SUCCESS;
     }
 
-    if (recId.block == -1 && recId.slot == -1)
-        return E_NOTFOUND;
+    IndLeaf rootBlockBuf;
+    int rootBlock = rootBlockBuf.getBlockNum();
 
-    RecBuffer recBuffer(recId.block);
-    recBuffer.getRecord(record, recId.slot);
-
-    return SUCCESS;
-}
-
-int BlockAccess::deleteRelation(char relName[ATTR_SIZE])
-{
-    if (strcmp(RELCAT_RELNAME, relName) == 0 || strcmp(ATTRCAT_RELNAME, relName) == 0)
-        return E_NOTPERMITTED;
-
-    RelCacheTable::resetSearchIndex(RELCAT_RELID);
-
-    Attribute relNameAttr;
-    strcpy(relNameAttr.sVal, relName);
-    RecId recId = linearSearch(RELCAT_RELID, RELCAT_ATTR_RELNAME, relNameAttr, EQ);
-    if (recId.block == -1 && recId.slot == -1)
-        return E_RELNOTEXIST;
-
-    Attribute relCatEntryRecord[RELCAT_NO_ATTRS];
-    RecBuffer recBuffer(recId.block);
-    recBuffer.getRecord(relCatEntryRecord, recId.slot);
-
-    int firstBlock = relCatEntryRecord[RELCAT_FIRST_BLOCK_INDEX].nVal;
-    int numAttrs = relCatEntryRecord[RELCAT_NO_ATTRIBUTES_INDEX].nVal;
-
-    int currBlock = firstBlock;
-    while (currBlock != -1)
+    if (rootBlock == E_DISKFULL)
     {
-        RecBuffer recBuffer(currBlock);
-        HeadInfo header;
-        recBuffer.getHeader(&header);
-        int nextBlock = header.rblock;
-        recBuffer.releaseBlock();
-        currBlock = nextBlock;
+        return E_DISKFULL;
     }
 
-    RelCacheTable::resetSearchIndex(ATTRCAT_RELID);
-    int numberOfAttributesDeleted = 0;
-
-    while (true)
-    {
-        RecId attrCatRecId = linearSearch(ATTRCAT_RELID, ATTRCAT_ATTR_RELNAME, relNameAttr, EQ);
-        if (attrCatRecId.block == -1 && attrCatRecId.slot == -1)
-            break;
-
-        numberOfAttributesDeleted++;
-
-        RecBuffer recBuffer(attrCatRecId.block);
-        HeadInfo header;
-        recBuffer.getHeader(&header);
-        Attribute record[header.numAttrs];
-        recBuffer.getRecord(record, attrCatRecId.slot);
-        int rootBlock = record[ATTRCAT_ROOT_BLOCK_INDEX].nVal;
-
-        unsigned char *slotMap = (unsigned char *)malloc(header.numSlots * sizeof(unsigned char));
-        recBuffer.getSlotMap(slotMap);
-        slotMap[attrCatRecId.slot] = SLOT_UNOCCUPIED;
-        recBuffer.setSlotMap(slotMap);
-        free(slotMap);
-
-        header.numEntries--;
-        recBuffer.setHeader(&header);
-
-        if (header.numEntries == 0)
-        {
-            RecBuffer recBufferlblock(header.lblock);
-            HeadInfo headerlblock;
-            recBufferlblock.getHeader(&headerlblock);
-            headerlblock.rblock = header.rblock;
-            recBufferlblock.setHeader(&headerlblock);
-            if (header.rblock != -1)
-            {
-                RecBuffer recBufferrblock(header.rblock);
-                HeadInfo headerrblock;
-                recBufferrblock.getHeader(&headerrblock);
-                headerrblock.lblock = header.lblock;
-                recBufferrblock.setHeader(&headerrblock);
-            }
-            else
-            {
-                RelCatEntry attrCatRelEntry;
-                RelCacheTable::getRelCatEntry(ATTRCAT_RELID, &attrCatRelEntry);
-                attrCatRelEntry.lastBlk = header.lblock;
-                RelCacheTable::setRelCatEntry(ATTRCAT_RELID, &attrCatRelEntry);
-
-                RecBuffer relCatBuffer(RELCAT_BLOCK);
-                Attribute record[RELCAT_NO_ATTRS];
-                relCatBuffer.getRecord(record, RELCAT_SLOTNUM_FOR_ATTRCAT);
-                record[RELCAT_LAST_BLOCK_INDEX].nVal = header.lblock;
-                relCatBuffer.setRecord(record, RELCAT_SLOTNUM_FOR_ATTRCAT);
-            }
-
-            recBuffer.releaseBlock();
-        }
-
-        if (rootBlock != -1)
-        {
-            BPlusTree::bPlusDestroy(rootBlock);
-        }
-    }
-
-    RecBuffer relCatBuffer(recId.block);
-    HeadInfo relCatHeader;
-    relCatBuffer.getHeader(&relCatHeader);
-    relCatHeader.numEntries--;
-    relCatBuffer.setHeader(&relCatHeader);
-    unsigned char *slotMap = (unsigned char *)malloc(relCatHeader.numSlots * sizeof(unsigned char));
-    relCatBuffer.getSlotMap(slotMap);
-    slotMap[recId.slot] = SLOT_UNOCCUPIED;
-    relCatBuffer.setSlotMap(slotMap);
-    free(slotMap);
+    attrCatEntry.rootBlock = rootBlock;
+    AttrCacheTable::setAttrCatEntry(relId, attrName, &attrCatEntry);
 
     RelCatEntry relCatEntry;
-    RelCacheTable::getRelCatEntry(RELCAT_RELID, &relCatEntry);
-    relCatEntry.numRecs--;
-    RelCacheTable::setRelCatEntry(RELCAT_RELID, &relCatEntry);
+    RelCacheTable::getRelCatEntry(relId, &relCatEntry);
 
-    RelCacheTable::getRelCatEntry(ATTRCAT_RELID, &relCatEntry);
-    relCatEntry.numRecs = relCatEntry.numRecs - numberOfAttributesDeleted;
-    RelCacheTable::setRelCatEntry(ATTRCAT_RELID, &relCatEntry);
-
-    return SUCCESS;
-}
-
-int BlockAccess::project(int relId, Attribute *record)
-{
-    RecId prevRecId;
-    RelCacheTable::getSearchIndex(relId, &prevRecId);
-
-    int block, slot;
-
-    if (prevRecId.block == -1 && prevRecId.slot == -1)
-    {
-        RelCatEntry relCatEntry;
-        RelCacheTable::getRelCatEntry(relId, &relCatEntry);
-        block = relCatEntry.firstBlk;
-        slot = 0;
-    }
-    else
-    {
-        block = prevRecId.block;
-        slot = prevRecId.slot + 1;
-    }
-
+    int block = relCatEntry.firstBlk;
     while (block != -1)
     {
         RecBuffer recBuffer(block);
 
-        HeadInfo header;
-        recBuffer.getHeader(&header);
-
-        unsigned char slotMap[header.numSlots];
+        unsigned char slotMap[relCatEntry.numSlotsPerBlk];
         recBuffer.getSlotMap(slotMap);
 
-        if (slot >= header.numSlots)
-        {
-            block = header.rblock;
-            slot = 0;
-        }
-        else if (slotMap[slot] == SLOT_UNOCCUPIED)
-        {
-            slot++;
-        }
-        else
-        {
-            break;
-        }
+        for (int i = 0; i < relCatEntry.numSlotsPerBlk; i++)
+            if (slotMap[i] == SLOT_OCCUPIED)
+            {
+                Attribute record[relCatEntry.numAttrs];
+                recBuffer.getRecord(record, i);
+
+                RecId recId{block, i};
+                int ret = bPlusInsert(relId, attrName, record[attrCatEntry.offset], recId);
+                if (ret != SUCCESS)
+                {
+                    return ret;
+                }
+            }
+
+        struct HeadInfo head;
+        recBuffer.getHeader(&head);
+        block = head.rblock;
     }
 
-    if (block == -1)
+    return SUCCESS;
+}
+
+int BPlusTree::bPlusDestroy(int rootBlockNum)
+{
+    if (rootBlockNum < 0 || rootBlockNum >= DISK_BLOCKS)
     {
-        return E_NOTFOUND;
+        return E_OUTOFBOUND;
     }
 
-    RecId nextRecId{block, slot};
-    RelCacheTable::setSearchIndex(relId, &nextRecId);
+    int type = StaticBuffer::getStaticBlockType(rootBlockNum);
 
-    RecBuffer recBuffer(block);
-    recBuffer.getRecord(record, slot);
+    if (type == IND_LEAF)
+    {
+        IndLeaf leafBlk(rootBlockNum);
+        leafBlk.releaseBlock();
 
+        return SUCCESS;
+    }
+    else if (type == IND_INTERNAL)
+    {
+        IndInternal internalBlk(rootBlockNum);
+        struct HeadInfo head;
+        internalBlk.getHeader(&head);
+
+        InternalEntry internalEntry;
+        internalBlk.IndInternal::getEntry(&internalEntry, 0);
+        if (internalEntry.lChild != -1)
+            bPlusDestroy(internalEntry.lChild);
+        for (int i = 0; i < head.numEntries; i++)
+        {
+            internalBlk.IndInternal::getEntry(&internalEntry, i);
+            if (internalEntry.rChild != -1)
+                bPlusDestroy(internalEntry.rChild);
+        }
+        internalBlk.releaseBlock();
+
+        return SUCCESS;
+    }
+    else
+    {
+        return E_INVALIDBLOCK;
+    }
+}
+
+int BPlusTree::bPlusInsert(int relId, char attrName[ATTR_SIZE], Attribute attrVal, RecId recId)
+{
+    AttrCatEntry attrCatEntry;
+    int ret = AttrCacheTable::getAttrCatEntry(relId, attrName, &attrCatEntry);
+    if (ret != SUCCESS)
+        return ret;
+
+    int rootBlk = attrCatEntry.rootBlock;
+    if (rootBlk == -1)
+        return E_NOINDEX;
+    
+    int leafBlkNum = findLeafToInsert(rootBlk, attrVal, attrCatEntry.attrType);
+
+    Index entry{
+        .attrVal = attrVal,
+        .block = recId.block,
+        .slot = recId.slot};
+    ret = insertIntoLeaf(relId, attrName, leafBlkNum, entry);
+    if (ret == E_DISKFULL)
+    {
+        bPlusDestroy(rootBlk);
+
+        attrCatEntry.rootBlock = -1;
+        AttrCacheTable::setAttrCatEntry(relId, attrName, &attrCatEntry);
+
+        return E_DISKFULL;
+    }
+
+    return SUCCESS;
+}
+
+int BPlusTree::findLeafToInsert(int rootBlock, Attribute attrVal, int attrType)
+{
+    int blockNum = rootBlock;
+
+    while (StaticBuffer::getStaticBlockType(blockNum) != IND_LEAF)
+    {
+        IndInternal internalBlk(blockNum);
+        HeadInfo head;
+        internalBlk.BlockBuffer::getHeader(&head);
+        
+        InternalEntry internalEntry;
+        bool flag = true;
+        for (int i = 0; i < head.numEntries; i++)
+        {
+            internalBlk.IndInternal::getEntry(&internalEntry, i);
+            int cmpVal = compareAttrs(internalEntry.attrVal, attrVal, attrType);
+            if (cmpVal >= 0)
+            {
+                blockNum = internalEntry.lChild;
+                flag = false;
+                break;
+            }
+        }
+        if (flag)
+        {
+            internalBlk.IndInternal::getEntry(&internalEntry, head.numEntries - 1);
+            blockNum = internalEntry.rChild;
+        }
+    }
+
+    return blockNum;
+}
+
+int BPlusTree::insertIntoLeaf(int relId, char attrName[ATTR_SIZE], int blockNum, Index indexEntry)
+{
+    AttrCatEntry attrCatEntry;
+    int ret = AttrCacheTable::getAttrCatEntry(relId, attrName, &attrCatEntry);
+    if (ret != SUCCESS)
+        return ret;
+
+    IndLeaf leafBlk(blockNum);
+    HeadInfo blockHeader;
+    leafBlk.BlockBuffer::getHeader(&blockHeader);
+    
+    Index indices[blockHeader.numEntries + 1];
+    bool flag = true;
+    for (int i = 0, j = 0; i < blockHeader.numEntries; i++)
+    {
+        Index entry;
+        leafBlk.IndLeaf::getEntry(&entry, i);
+        int cmpVal = compareAttrs(entry.attrVal, indexEntry.attrVal, attrCatEntry.attrType);
+        if (flag && cmpVal >= 0)
+        {
+            indices[j++] = indexEntry;
+            flag = false;
+        }
+        indices[j++] = entry;
+    }
+    if (flag)
+    {
+        indices[blockHeader.numEntries] = indexEntry;
+    }
+    
+
+    if (blockHeader.numEntries != MAX_KEYS_LEAF)
+    {
+        blockHeader.numEntries++;
+        leafBlk.BlockBuffer::setHeader(&blockHeader);
+
+        for (int i = 0; i < blockHeader.numEntries; i++)
+        {
+            leafBlk.IndLeaf::setEntry(&indices[i], i);
+        }
+
+        return SUCCESS;
+    }
+
+    int newRightBlk = splitLeaf(blockNum, indices);
+    if (newRightBlk == E_DISKFULL)
+        return E_DISKFULL;
+
+    if (blockHeader.pblock != -1)
+    {
+        InternalEntry internalEntry;
+        internalEntry.attrVal = indices[MIDDLE_INDEX_LEAF].attrVal;
+        internalEntry.lChild = blockNum;
+        internalEntry.rChild = newRightBlk;
+        int ret = insertIntoInternal(relId, attrName, blockHeader.pblock, internalEntry);
+        if (ret != SUCCESS)
+            return ret;
+    }
+    else
+    {
+        int ret = createNewRoot(relId, attrName, indices[MIDDLE_INDEX_LEAF].attrVal, blockNum, newRightBlk);
+        if (ret != SUCCESS)
+            return ret;
+    }
+
+    return SUCCESS;
+}
+
+int BPlusTree::splitLeaf(int leafBlockNum, Index indices[])
+{
+    IndLeaf rightBlk;
+    IndLeaf leftBlk(leafBlockNum);
+    int rightBlkNum = rightBlk.getBlockNum();
+    int leftBlkNum = leftBlk.getBlockNum();
+
+    if (rightBlkNum == E_DISKFULL)
+    {
+        return E_DISKFULL;
+    }
+
+    HeadInfo leftBlkHeader, rightBlkHeader;
+    leftBlk.BlockBuffer::getHeader(&leftBlkHeader);
+    rightBlk.BlockBuffer::getHeader(&rightBlkHeader);
+
+    rightBlkHeader.numEntries = (MAX_KEYS_LEAF + 1) / 2;
+    rightBlkHeader.pblock = leftBlkHeader.pblock;
+    rightBlkHeader.lblock = leftBlkNum;
+    rightBlkHeader.rblock = leftBlkHeader.rblock;
+    rightBlk.BlockBuffer::setHeader(&rightBlkHeader);
+    if (rightBlkHeader.rblock != -1) {
+        IndLeaf nextBlk(rightBlkHeader.rblock);
+        HeadInfo nextHeader;
+        nextBlk.getHeader(&nextHeader);
+        nextHeader.lblock = rightBlkNum;
+        nextBlk.setHeader(&nextHeader);
+    }
+
+    leftBlkHeader.numEntries = (MAX_KEYS_LEAF + 1) / 2;
+    leftBlkHeader.rblock = rightBlkNum;
+    leftBlk.BlockBuffer::setHeader(&leftBlkHeader);
+
+    for (int i = 0; i < leftBlkHeader.numEntries; i++)
+    {
+        int ret = leftBlk.IndLeaf::setEntry(&indices[i], i);
+        if (ret != SUCCESS)
+            return ret;
+    }
+    for (int i = 0; i < rightBlkHeader.numEntries; i++)
+    {
+        int ret = rightBlk.IndLeaf::setEntry(&indices[i + leftBlkHeader.numEntries], i);
+        if (ret != SUCCESS)
+            return ret;
+    }
+
+    return rightBlkNum;
+}
+
+int BPlusTree::insertIntoInternal(int relId, char attrName[ATTR_SIZE], int intBlockNum, InternalEntry intEntry)
+{
+    AttrCatEntry attrCatEntry;
+    int ret = AttrCacheTable::getAttrCatEntry(relId, attrName, &attrCatEntry);
+    if (ret != SUCCESS)
+        return ret;
+        
+    IndInternal intBlk(intBlockNum);
+    HeadInfo blockHeader;
+    intBlk.BlockBuffer::getHeader(&blockHeader);
+    // load blockHeader with header of intBlk using BlockBuffer::getHeader().
+
+    // declare internalEntries to store all existing entries + the new entry
+    bool flag = true;
+    InternalEntry internalEntries[blockHeader.numEntries + 1];
+    int idx = -1;
+    for (int i = 0, j = 0; i < blockHeader.numEntries; i++)
+    {
+        InternalEntry entry;
+        intBlk.IndInternal::getEntry(&entry, i);
+        int cmpVal = compareAttrs(entry.attrVal, intEntry.attrVal, attrCatEntry.attrType);
+        if (flag && cmpVal >= 0)
+        {
+            idx = j;
+            internalEntries[j++] = intEntry;
+            flag = false;
+        }
+        internalEntries[j++] = entry;
+    }
+    if (flag)
+    {
+        idx = blockHeader.numEntries;
+        internalEntries[blockHeader.numEntries] = intEntry;
+    }
+
+    if(idx > 0){
+        internalEntries[idx - 1].rChild = intEntry.lChild;
+    }
+    if(idx < blockHeader.numEntries){
+        internalEntries[idx + 1].lChild = intEntry.rChild;
+    }
+    
+    if (blockHeader.numEntries != MAX_KEYS_INTERNAL)
+    {
+        blockHeader.numEntries++;
+        intBlk.BlockBuffer::setHeader(&blockHeader);
+        
+        for (int i = 0; i < blockHeader.numEntries; i++)
+        {
+            intBlk.IndInternal::setEntry(&internalEntries[i], i);
+        }
+
+        return SUCCESS;
+    }
+
+    int newRightBlk = splitInternal(intBlockNum, internalEntries);
+
+    if (newRightBlk == E_DISKFULL)
+    {
+        bPlusDestroy(intEntry.rChild);
+        return E_DISKFULL;
+    }
+
+    if (blockHeader.pblock != -1)
+    {
+        InternalEntry newInternalEntry;
+        newInternalEntry.attrVal = internalEntries[MIDDLE_INDEX_INTERNAL].attrVal;
+        newInternalEntry.lChild = intBlockNum;
+        newInternalEntry.rChild = newRightBlk;
+
+        return insertIntoInternal(relId, attrName, blockHeader.pblock, newInternalEntry);
+
+    }
+    else
+    {
+        return createNewRoot(relId, attrName, internalEntries[MIDDLE_INDEX_INTERNAL].attrVal, intBlockNum, newRightBlk);
+
+    }
+}
+
+int BPlusTree::splitInternal(int intBlockNum, InternalEntry internalEntries[])
+{
+    IndInternal rightBlk;
+    IndInternal leftBlk(intBlockNum);
+
+    int rightBlkNum = rightBlk.getBlockNum();
+    int leftBlkNum = leftBlk.getBlockNum();
+
+    if (rightBlkNum == E_DISKFULL)
+        return E_DISKFULL;
+    
+    HeadInfo leftBlkHeader, rightBlkHeader;
+
+    leftBlk.BlockBuffer::getHeader(&leftBlkHeader);
+    rightBlk.BlockBuffer::getHeader(&rightBlkHeader);
+
+    rightBlkHeader.numEntries = (MAX_KEYS_INTERNAL) / 2;
+    rightBlkHeader.pblock = leftBlkHeader.pblock;
+    rightBlk.BlockBuffer::setHeader(&rightBlkHeader);
+
+    leftBlkHeader.numEntries = (MAX_KEYS_INTERNAL) / 2;
+    leftBlk.BlockBuffer::setHeader(&leftBlkHeader);
+
+    for (int i = 0; i < leftBlkHeader.numEntries; i++)
+    {
+        leftBlk.IndInternal::setEntry(&internalEntries[i], i);
+    }
+    for (int i = 0; i < rightBlkHeader.numEntries; i++)
+    {
+        rightBlk.IndInternal::setEntry(&internalEntries[i + MIDDLE_INDEX_INTERNAL + 1], i);
+    }
+
+    int type = StaticBuffer::getStaticBlockType(internalEntries[0].lChild);
+
+    BlockBuffer firstChild(internalEntries[MIDDLE_INDEX_INTERNAL + 1].lChild);
+    HeadInfo fHeader;
+    firstChild.getHeader(&fHeader);
+    fHeader.pblock = rightBlkNum;
+    firstChild.setHeader(&fHeader);
+
+    for (int i = 0; i < rightBlkHeader.numEntries; i++)
+    {
+        BlockBuffer childBlk(internalEntries[i + MIDDLE_INDEX_INTERNAL + 1].rChild);
+        HeadInfo childHeader;
+        childBlk.BlockBuffer::getHeader(&childHeader);
+        childHeader.pblock = rightBlkNum;
+        childBlk.BlockBuffer::setHeader(&childHeader);
+    }
+
+    return rightBlkNum;
+}
+
+int BPlusTree::createNewRoot(int relId, char attrName[ATTR_SIZE], Attribute attrVal, int lChild, int rChild)
+{
+    AttrCatEntry attrCatEntry;
+    AttrCacheTable::getAttrCatEntry(relId, attrName, &attrCatEntry);
+
+
+    IndInternal newRootBlk;
+
+    int newRootBlkNum = newRootBlk.getBlockNum();
+
+    if (newRootBlkNum == E_DISKFULL)
+    {
+        bPlusDestroy(rChild);
+        return E_DISKFULL;
+    }
+
+    HeadInfo newRootHeader;
+    newRootBlk.BlockBuffer::getHeader(&newRootHeader);
+    newRootHeader.numEntries = 1;
+    newRootBlk.BlockBuffer::setHeader(&newRootHeader);
+
+    InternalEntry internalEntry;
+    internalEntry.attrVal = attrVal;
+    internalEntry.lChild = lChild;
+    internalEntry.rChild = rChild;
+    newRootBlk.IndInternal::setEntry(&internalEntry, 0);
+
+    BlockBuffer leftChildBlk(lChild);
+    BlockBuffer rightChildBlk(rChild);
+
+    HeadInfo leftChildHeader, rightChildHeader;
+    leftChildBlk.BlockBuffer::getHeader(&leftChildHeader);
+    rightChildBlk.BlockBuffer::getHeader(&rightChildHeader);
+
+    leftChildHeader.pblock = newRootBlkNum;
+    rightChildHeader.pblock = newRootBlkNum;
+
+    leftChildBlk.BlockBuffer::setHeader(&leftChildHeader);
+    rightChildBlk.BlockBuffer::setHeader(&rightChildHeader);
+
+    attrCatEntry.rootBlock = newRootBlkNum;
+    AttrCacheTable::setAttrCatEntry(relId, attrName, &attrCatEntry);
     return SUCCESS;
 }
